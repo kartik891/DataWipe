@@ -1,0 +1,12 @@
+{
+  "schema": "datawipe.identity.v1",
+  "description": "SATA HDD with a 4 MiB HPA and a 1 MiB DCO: the last 5 MiB of the image are hidden from the host",
+  "transport": "sata",
+  "model": "DW-SIM HDD5400 HPA",
+  "serial": "SIMHDD-HPA-0002",
+  "firmware": "SIM1.0",
+  "rotation_rate": 5400,
+  "capacity": { "total_sectors": "auto", "dco_hidden_sectors": 2048, "hpa_hidden_sectors": 8192 },
+  "security": { "supported": true, "enhanced_erase": true },
+  "self_encrypting": false
+}

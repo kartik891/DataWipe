@@ -1,0 +1,13 @@
+{
+  "schema": "datawipe.identity.v1",
+  "description": "7200 RPM SATA HDD, ATA Security with Enhanced Erase, no HPA/DCO",
+  "transport": "sata",
+  "model": "DW-SIM HDD7200",
+  "serial": "SIMHDD-0001",
+  "firmware": "SIM1.0",
+  "rotation_rate": 7200,
+  "capacity": { "total_sectors": "auto" },
+  "security": { "supported": true, "enhanced_erase": true },
+  "sanitize": { "supported": false },
+  "self_encrypting": false
+}

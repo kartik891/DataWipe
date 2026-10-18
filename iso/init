@@ -1,0 +1,26 @@
+#!/bin/busybox sh
+# DataWipe live system, PID 1. Everything runs from RAM; nothing on any disk is mounted
+# except the state stick the operator chooses in the menu.
+/bin/busybox --install -s /bin
+export PATH=/usr/bin:/bin
+export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+mount -t proc proc /proc
+mount -t sysfs sys /sys
+mount -t devtmpfs dev /dev
+ln -sf /proc/self/fd /dev/fd  # bash process substitution
+ln -sf fd/0 /dev/stdin; ln -sf fd/1 /dev/stdout; ln -sf fd/2 /dev/stderr
+mkdir -p /dev/pts /tmp /mnt/store
+mount -t devpts devpts /dev/pts
+mount -t tmpfs tmp /tmp
+mount -t securityfs securityfs /sys/kernel/security 2>/dev/null
+echo "1 4 1 7" >/proc/sys/kernel/printk  # keep kernel chatter off the menu
+
+for m in $(cat /etc/datawipe/modules); do insmod "/lib/datawipe-modules/$m.ko" 2>/dev/null; done
+sleep 3  # let USB, SATA, NVMe and MMC finish enumerating
+
+tty=$(sed -n 's/.*datawipe\.tty=\([^ ]*\).*/\1/p' /proc/cmdline)
+tty=${tty:-tty1}
+while true; do
+    setsid -c /bin/bash /usr/bin/datawipe-menu <"/dev/$tty" >"/dev/$tty" 2>&1
+    sleep 1
+done

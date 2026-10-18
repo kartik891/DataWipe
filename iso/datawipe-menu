@@ -1,0 +1,138 @@
+#!/bin/bash
+# DataWipe live menu. Runs on the console init chose (tty1, or ttyS0 for headless servers).
+#
+# State lives on a USB stick the operator chooses ("state stick"): journals, pre-wipe
+# fingerprints, certificates, session logs, PDFs, hardware-test reports, and the organisation's
+# signing key under datawipe/keys/. Without one, everything goes to RAM and is lost at shutdown.
+# The stick is mounted, so datawipe's own gate refuses to wipe it.
+
+STORE=/mnt/store
+export DATAWIPE_STATE_DIR=/tmp/datawipe
+mkdir -p "$DATAWIPE_STATE_DIR"
+
+pause() { read -r -p "  Press Enter to continue " _; }
+hr() { printf '%s\n' "------------------------------------------------------------------------"; }
+
+store_dev() { awk -v m="$STORE" '$2 == m { print $1 }' /proc/mounts; }
+
+secure_boot() {
+    local l=/sys/kernel/security/lockdown
+    if [[ -r $l ]] && grep -q '\[integrity\]\|\[confidentiality\]' "$l"; then echo "on (kernel lockdown active)"
+    else echo "off"; fi
+}
+
+banner() {
+    clear 2>/dev/null
+    hr
+    echo "  DataWipe $(datawipe --version | cut -d' ' -f2) live      Secure Boot: $(secure_boot)"
+    if [[ -n $(store_dev) ]]; then echo "  State stick: $(store_dev) -> $DATAWIPE_STATE_DIR"
+    else echo "  State stick: NONE - certificates and journals are in RAM and lost at power-off"; fi
+    if [[ -n ${DATAWIPE_SIGN_KEY:-} ]]; then echo "  Signing key: $DATAWIPE_SIGN_KEY"
+    else echo "  Signing key: none - certificates will be UNSIGNED"; fi
+    hr
+}
+
+# Whole disks worth listing: not loop/ram/optical/eMMC hardware partitions.
+disks() {
+    local d n
+    for d in /sys/block/*; do
+        n=${d##*/}
+        case $n in loop*|ram*|zram*|sr*|dm-*|md*|mmcblk*boot*|mmcblk*rpmb) continue ;; esac
+        echo "$n"
+    done
+}
+
+describe_disk() {
+    local n=$1 d=/sys/block/$1 size model bus use=""
+    local bytes=$(( $(cat "$d/size") * 512 ))
+    if (( bytes >= 10000000000 )); then size="$(( bytes / 1000000000 )) GB"; else size="$(( bytes / 1000000 )) MB"; fi
+    model=$(cat "$d/device/model" 2>/dev/null || cat "$d/device/name" 2>/dev/null)
+    case $n in nvme*) bus=NVMe ;; mmcblk*) bus=eMMC ;; *) bus=SATA/SAS ;; esac
+    [[ $(readlink -f "$d/device") == */usb* ]] && bus=USB
+    grep -q "^/dev/$n" /proc/mounts && use="  [IN USE: mounted]"
+    blkid "/dev/$n" 2>/dev/null | grep -q 'LABEL="DATAWIPE"' && use="  [this DataWipe boot media]"
+    printf "%-10s %9s  %-8s %s%s\n" "/dev/$n" "$size" "$bus" "$(echo $model)" "$use"
+}
+
+choose_disk() {  # sets $DISK
+    local list=() i=1 n
+    echo "  Disks:"
+    for n in $(disks); do list+=("$n"); printf "  %2d) " $i; describe_disk "$n"; i=$((i + 1)); done
+    [[ ${#list[@]} -eq 0 ]] && { echo "  no disks found"; DISK=""; return 1; }
+    read -r -p "  Number (Enter to cancel): " i
+    [[ $i =~ ^[0-9]+$ ]] && (( i >= 1 && i <= ${#list[@]} )) || { DISK=""; return 1; }
+    DISK=/dev/${list[$((i - 1))]}
+}
+
+use_store() {
+    if [[ -n $(store_dev) ]]; then
+        read -r -p "  $(store_dev) is the state stick. Unmount it? [y/N] " a
+        [[ $a == [yY] ]] && { sync; umount "$STORE" && echo "  unmounted"; export DATAWIPE_STATE_DIR=/tmp/datawipe; unset DATAWIPE_SIGN_KEY; }
+        return
+    fi
+    local list=() i=1 line dev
+    echo "  Filesystems that can hold the state (FAT, exFAT, ext4):"
+    while read -r line; do
+        dev=${line%%:*}
+        [[ $line =~ TYPE=\"(vfat|exfat|ext4|ext3|ext2)\" ]] || continue
+        list+=("$dev")
+        printf "  %2d) %s\n" $i "$line"
+        i=$((i + 1))
+    done < <(blkid)
+    [[ ${#list[@]} -eq 0 ]] && { echo "  none found: insert a USB stick formatted FAT32, exFAT or ext4"; return; }
+    read -r -p "  Number (Enter to cancel): " i
+    [[ $i =~ ^[0-9]+$ ]] && (( i >= 1 && i <= ${#list[@]} )) || return
+    dev=${list[$((i - 1))]}
+    if ! mount "$dev" "$STORE"; then echo "  could not mount $dev"; return; fi
+    mkdir -p "$STORE/datawipe/keys"
+    export DATAWIPE_STATE_DIR=$STORE/datawipe
+    local key
+    key=$(ls "$STORE"/datawipe/keys/*.key.pem 2>/dev/null | head -1)
+    if [[ -n $key ]]; then export DATAWIPE_SIGN_KEY=$key; echo "  signing key found: $key"
+    else unset DATAWIPE_SIGN_KEY; echo "  no signing key in datawipe/keys/ (create one from the DataWipe menu)"; fi
+    echo "  state now goes to $DATAWIPE_STATE_DIR"
+}
+
+hardware_test() {
+    [[ -z $(store_dev) ]] && { echo "  choose a state stick first: the report must survive power-off"; return; }
+    choose_disk || return
+    DATAWIPE=/usr/bin/datawipe /usr/bin/hardware_test.sh "$DISK" "$STORE/datawipe/hwtest-${DISK##*/}-$(date -u +%Y%m%dT%H%M%SZ)"
+    sync
+}
+
+unfreeze() {
+    echo "  Many BIOSes freeze ATA security at boot, so Secure Erase is refused until the drive is"
+    echo "  power-cycled. Suspending to RAM and waking (press the power button or a key) usually"
+    echo "  unfreezes it. Alternative: hot-plug the drive's SATA power while running."
+    read -r -p "  Suspend now? [y/N] " a
+    [[ $a == [yY] ]] || return
+    sync
+    echo mem >/sys/power/state && echo "  resumed; re-probe the drive (Probe) to check its security state"
+}
+
+# Drives, wiping, certificates and the signing key are the same guided mode as on an installed
+# system (datawipe interactive); it lists physical disks because the flag is given here. The
+# items below it are the ones only a live system needs.
+while true; do
+    banner
+    echo "   1) DataWipe: list and inspect drives, WIPE, verify certificates, signing key"
+    echo "   2) Choose state USB stick (journals, certificates, signing key)"
+    echo "   3) Hardware test (spare drives only)"
+    echo "   4) Unfreeze drives (suspend and resume)"
+    echo "   5) Shell"
+    echo "   0) Power off            r) Reboot"
+    read -r -p "  Choice: " choice
+    hr
+    case $choice in
+        1) [[ -z $(store_dev) ]] && echo "  WARNING: no state stick: certificates and keys will be lost at power-off."
+           datawipe interactive --i-understand-this-is-destructive; sync; continue ;;
+        2) use_store ;;
+        3) hardware_test ;;
+        4) unfreeze ;;
+        5) echo "  'exit' returns to the menu"; bash ;;
+        0) sync; umount "$STORE" 2>/dev/null; echo "  powering off"; poweroff -f ;;
+        r|R) sync; umount "$STORE" 2>/dev/null; echo "  rebooting"; reboot -f ;;
+        *) continue ;;
+    esac
+    pause
+done

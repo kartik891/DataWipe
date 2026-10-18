@@ -1,0 +1,158 @@
+.TH DATAWIPE 1 "October 2026" "datawipe 0.1.0" "User Commands"
+.SH NAME
+datawipe \- sanitize a disk, verify the result and issue a certificate
+.SH SYNOPSIS
+.B datawipe
+[\fBinteractive\fR] [\fB\-\-i\-understand\-this\-is\-destructive\fR] [\fB\-\-experimental\fR] [\fB\-\-state\-dir\fR \fIdir\fR]
+.br
+.B datawipe probe
+\fItarget\fR [\fB\-\-identity\fR \fIprofile.json\fR] [\fB\-\-json\fR]
+.br
+.B datawipe plan
+\fItarget\fR [\fB\-\-identity\fR \fIprofile.json\fR] [\fB\-\-experimental\fR] [\fB\-\-json\fR]
+.br
+.B datawipe run
+\fItarget\fR [\fB\-\-identity\fR \fIprofile.json\fR] [\fB\-\-resume\fR | \fB\-\-restart\fR] [\fB\-\-sign\-key\fR \fIkey.pem\fR] [\fIoptions\fR]
+.br
+.B datawipe verify
+\fItarget\fR \fB\-\-cert\fR \fIcertificate.json\fR
+.br
+.B datawipe verify\-cert
+\fIcertificate.json\fR|\fI.pdf\fR [\fB\-\-pubkey\fR \fIissuer.pub.pem\fR] [\fB\-\-log\fR \fIsession.dwlog.jsonl\fR]
+.br
+.B datawipe keygen
+\fIprefix\fR [\fB\-\-no\-passphrase\fR]
+.br
+.B datawipe ata\-unlock
+\fI/dev/sdX\fR \fB\-\-i\-understand\-this\-is\-destructive \-\-experimental\fR [\fB\-\-password\fR \fIP\fR]
+.SH DESCRIPTION
+.B datawipe
+erases storage media following NIST SP 800\-88 (Clear and Purge), reads back a
+risk\-weighted sample of the medium to verify the result (ARVS), scores it with the
+Sanitization Confidence Index (SCI), and writes a certificate whose session history is a
+hash chain signed with the issuing organisation's Ed25519 key (TECC).
+.PP
+A \fItarget\fR is a disk image file, a loop device backed by an image the invoking user
+owns, or a physical disk. Image files and loop devices stand in for a drive described by
+\fB\-\-identity\fR; they are for trials and tests. Partitions are always refused.
+.PP
+With no command on a terminal, or with \fBinteractive\fR, a guided menu is shown: list
+drives, inspect one, wipe, verify a certificate, create a signing key.
+.SH SAFETY
+\fBWiping destroys all data on the target and cannot be undone.\fR
+A physical disk is written only when all of the following hold: the process runs as root;
+the drive identified itself with its own commands; nothing uses it (mounts, swap, LVM, RAID,
+device\-mapper); \fB\-\-i\-understand\-this\-is\-destructive\fR was given; and the operator,
+at an interactive terminal, retyped the drive's serial number and then its device path.
+The guided mode lists physical disks only when started with that flag.
+.PP
+\fBprobe\fR and \fBplan\fR are read\-only.
+.SH COMMANDS
+.TP
+.B probe
+Detect and classify the target (model, serial, size, media type, hidden areas, firmware
+erase support).
+.TP
+.B plan
+Probe, then show the sanitization method that would be used, step by step. Writes nothing.
+.TP
+.B run
+Execute the plan, verify it and write the certificate (JSON, PDF copy and session log).
+.TP
+.B verify
+Re\-read a previously wiped medium against its certificate.
+.TP
+.B verify\-cert
+Check a certificate's seal, signature and, with \fB\-\-log\fR, its full session history.
+.TP
+.B keygen
+Create an organisation signing key pair: \fIprefix\fR.key.pem (private, passphrase
+protected) and \fIprefix\fR.pub.pem (to publish).
+.TP
+.B ata\-unlock
+Remove the ATA password left on a drive by an interrupted Secure Erase.
+.SH OPTIONS
+.TP
+.B \-\-i\-understand\-this\-is\-destructive
+Required to write a physical disk, and for the guided mode to list physical disks.
+.TP
+.B \-\-experimental
+Also use firmware commands that have not yet been validated on real hardware by this
+project. Without it, plans fall back to validated methods and say what was left out.
+.TP
+.BI \-\-state\-dir " dir"
+Where journals, certificates and keys/ for physical disks are kept (default: the current
+directory, or \fBDATAWIPE_STATE_DIR\fR). Prefer this option under sudo.
+.TP
+.BI \-\-sign\-key " key.pem"
+Sign the certificate with this private key. Without a key the certificate is unsigned:
+its integrity can be checked, its origin cannot.
+.TP
+.BR \-\-resume ", " \-\-restart
+Continue an interrupted wipe from its journal, or discard the journal and begin again.
+.TP
+.BI \-\-cert " path"
+Certificate path (for \fBrun\fR: where to write it; for \fBverify\fR: which to check against).
+.TP
+.BR \-\-sampler " arvs|uniform, " \-\-verify\-budget " \fIpercent\fR, " \-\-fixed\-budget ", " \-\-sci\-lambda " \fIn\fR, " \-\-rewipe\-attempts " \fIn\fR, " \-\-no\-verify
+Verification settings. Run \fBdatawipe\fR with a wrong argument to print the full list.
+.TP
+.BR \-\-keep\-hidden ", " \-\-no\-defense\-in\-depth ", " \-\-direct ", " \-\-buffer\-size " \fIsize\fR, " \-\-sync\-every " \fIsize\fR, " \-\-journal " \fIpath\fR"
+Execution settings.
+.TP
+.BR \-\-json ", " \-v
+Machine\-readable output; verbose logging.
+.SH EXIT STATUS
+.TS
+l l.
+0	completed
+1	usage error
+2	refused by a safety check
+3	detection failed
+4	not supported
+5	error
+6	a plan step failed (journal kept)
+7	interrupted (resumable)
+8	verification failed, or certificate check failed
+10	hidden area (HPA/DCO) removed: run again to wipe the full capacity
+.TE
+.SH ENVIRONMENT
+.TP
+.B DATAWIPE_STATE_DIR
+Default for \fB\-\-state\-dir\fR.
+.TP
+.B DATAWIPE_SIGN_KEY
+Default for \fB\-\-sign\-key\fR.
+.TP
+.B DATAWIPE_KEY_PASSPHRASE
+Passphrase of the signing key, instead of a terminal prompt.
+.TP
+.B NO_COLOR
+Disable colour in the guided mode.
+.SH FILES
+.TP
+.I /usr/share/datawipe/profiles/
+Simulated drive profiles for use with image files and loop devices.
+.TP
+.I /usr/share/datawipe/hardware_test.sh
+Spare\-drive test that validates firmware commands on real hardware.
+.TP
+.I /usr/share/doc/datawipe/README.md
+Full documentation, including what has and has not been validated on real drives.
+.SH EXAMPLES
+Try it on a scratch image:
+.PP
+.nf
+.RS
+truncate \-s 64M disk.img
+datawipe run disk.img \-\-identity /usr/share/datawipe/profiles/hdd_basic.json
+.RE
+.fi
+.PP
+Wipe a real disk through the guided mode:
+.PP
+.nf
+.RS
+sudo datawipe interactive \-\-i\-understand\-this\-is\-destructive \-\-state\-dir ~/datawipe\-state
+.RE
+.fi

@@ -1,0 +1,111 @@
+# DataWipe CI. Nothing here touches a real drive: images, loop devices, QEMU guests, and on the
+# Windows runner a throwaway VHD that is only probed (the wipe gate needs a human at a terminal,
+# so the CI run checks that it refuses).
+name: ci
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    env:
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-14 cmake libssl-dev qemu-system-x86 busybox-static ovmf xorriso mtools \
+            dosfstools python3
+      - name: Enable KVM for the QEMU bench
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm || true
+      - name: Build
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo && cmake --build build -j"$(nproc)"
+      - name: Unit suites and image end-to-end
+        run: cd build && ctest -E 'qemu|iso' --output-on-failure
+      - name: QEMU drive bench and live image boot
+        # These download Ubuntu's kernel, shim and GRUB for the runner's own kernel version, which
+        # differs from the release machine's; a failure here is reported but does not fail CI.
+        continue-on-error: true
+        run: cd build && ctest -R 'qemu|iso' --output-on-failure
+      - name: End-to-end through a loop device (root)
+        run: cd build && sudo -E env DATAWIPE="$PWD/datawipe" PROFILES="$PWD/../profiles" ../scripts/e2e.sh --loop
+      - name: Packages
+        run: scripts/package.sh --no-tests --no-iso
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/
+
+  windows-cross:
+    # The release's datawipe.exe: cross-compiled with MinGW-w64, tested under Wine.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/datawipe-win
+          key: win-toolchain-${{ hashFiles('scripts/win_toolchain.sh') }}
+      - name: Toolchain (MinGW-w64, OpenSSL for Windows, Wine)
+        run: sudo apt-get update && sudo apt-get install -y cmake && scripts/win_toolchain.sh
+      - name: Build and test under Wine
+        run: scripts/win_build.sh --test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: datawipe-exe
+          path: build-win/datawipe.exe
+
+  windows-native:
+    # Real Windows APIs instead of Wine: the unit suites, then read-only probes of a throwaway
+    # VHD and of the runner's system disk, and the refusals of the destructive gate.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-openssl gzip
+      - name: Build
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DOPENSSL_USE_STATIC_LIBS=ON
+          cmake --build build
+      - name: Unit suites
+        run: cd build && ctest -R '^test_' --output-on-failure
+      - name: Image wipe on real Windows
+        run: |
+          cd build
+          fsutil file createnew disk.img 33554432
+          ./datawipe.exe run disk.img --identity ../profiles/hdd_basic.json
+          ./datawipe.exe verify-cert "$(ls disk.img.*.dwcert.json | head -1)"
+      - name: Probe a throwaway VHD and the system disk (read-only)
+        shell: pwsh
+        run: |
+          $vhd = Join-Path $env:RUNNER_TEMP 'dw-ci.vhdx'
+          "create vdisk file=`"$vhd`" maximum=64 type=expandable`nattach vdisk" | Out-File -Encoding ascii dp.txt
+          diskpart /s dp.txt
+          $n = (Get-Disk | Where-Object { $_.Location -like '*dw-ci.vhdx*' }).Number
+          if ($null -eq $n) { throw 'VHD not attached' }
+          $exe = 'build\datawipe.exe'
+          & $exe probe "\\.\PhysicalDrive$n"
+          if ($LASTEXITCODE -ne 0) { throw "probe of the VHD failed: $LASTEXITCODE" }
+          & $exe plan "\\.\PhysicalDrive$n"
+          if ($LASTEXITCODE -ne 0) { throw "plan of the VHD failed: $LASTEXITCODE" }
+          # No interactive terminal: the gate must refuse (exit 2) without writing.
+          & $exe run "\\.\PhysicalDrive$n" --i-understand-this-is-destructive
+          if ($LASTEXITCODE -ne 2) { throw "the destructive gate did not refuse: $LASTEXITCODE" }
+          # The runner's system disk must be reported in use.
+          $sys = (Get-Partition -DriveLetter C).DiskNumber
+          $out = & $exe probe "\\.\PhysicalDrive$sys" 2>&1 | Out-String
+          Write-Output $out
+          if ($out -notmatch 'running Windows installation') { throw 'system disk not reported in use' }
+          & $exe run '\\.\C:' --i-understand-this-is-destructive
+          if ($LASTEXITCODE -ne 2) { throw "a volume path was not refused: $LASTEXITCODE" }
+          "select vdisk file=`"$vhd`"`ndetach vdisk" | Out-File -Encoding ascii dp2.txt
+          diskpart /s dp2.txt

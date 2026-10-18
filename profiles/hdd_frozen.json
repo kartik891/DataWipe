@@ -1,0 +1,12 @@
+{
+  "schema": "datawipe.identity.v1",
+  "description": "SATA HDD whose security was frozen by the BIOS at boot: Secure Erase unavailable",
+  "transport": "sata",
+  "model": "DW-SIM HDD7200 FROZEN",
+  "serial": "SIMHDD-FRZ-0006",
+  "firmware": "SIM1.0",
+  "rotation_rate": 7200,
+  "capacity": { "total_sectors": "auto" },
+  "security": { "supported": true, "enhanced_erase": true, "frozen": true },
+  "self_encrypting": false
+}

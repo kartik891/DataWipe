@@ -1,0 +1,13 @@
+{
+  "schema": "datawipe.identity.v1",
+  "description": "eMMC 5.1 with SANITIZE (EXT_CSD SEC_FEATURE_SUPPORT bit 6)",
+  "transport": "emmc",
+  "model": "DW-SIM eMMC",
+  "serial": "SIMEMMC-0005",
+  "firmware": "SIM5.1",
+  "rotation_rate": 1,
+  "capacity": { "total_sectors": "auto" },
+  "sanitize": { "supported": true },
+  "self_encrypting": false,
+  "wear_ratio": 0.40
+}

@@ -1,0 +1,14 @@
+{
+  "schema": "datawipe.identity.v1",
+  "description": "Self-encrypting (TCG Opal) SATA SSD with SANITIZE crypto scramble + block erase",
+  "transport": "sata",
+  "model": "DW-SIM SSD OPAL",
+  "serial": "SIMSSD-OPAL-0003",
+  "firmware": "SIM2.1",
+  "rotation_rate": 1,
+  "capacity": { "total_sectors": "auto" },
+  "security": { "supported": true, "enhanced_erase": true },
+  "sanitize": { "supported": true, "crypto_scramble": true, "block_erase": true },
+  "self_encrypting": true,
+  "wear_ratio": 0.12
+}

@@ -1,0 +1,14 @@
+# Build trees and release output
+/build/
+/build-*/
+/dist/
+# Test scratch (e2e work directories, images, session files left by manual runs)
+dw_e2e_*/
+dw_isotest_*/
+*.img
+*.dwjournal
+*.dwfp
+*.dwfp.tmp
+__pycache__/
+# Signing keys must never be committed
+*.key.pem

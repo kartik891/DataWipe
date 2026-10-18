@@ -1,0 +1,13 @@
+{
+  "schema": "datawipe.identity.v1",
+  "description": "Unencrypted NVMe SSD; Sanitize block erase only (fields mapped from Identify Controller SANICAP)",
+  "transport": "nvme",
+  "model": "DW-SIM NVMe",
+  "serial": "SIMNVME-0004",
+  "firmware": "SIM3.0",
+  "rotation_rate": 1,
+  "capacity": { "total_sectors": "auto" },
+  "sanitize": { "supported": true, "block_erase": true },
+  "self_encrypting": false,
+  "wear_ratio": 0.03
+}
