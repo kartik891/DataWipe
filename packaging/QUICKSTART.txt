@@ -1,0 +1,139 @@
+DataWipe 0.1.0 - QUICK START
+============================
+
+BEFORE ANYTHING
+---------------
+* Wiping PERMANENTLY destroys everything on the chosen disk. There is no undo.
+  Back up anything you need first.
+* Try it on a test file first (step 2 of your route). It shows the whole
+  process without touching a real disk.
+* DataWipe never wipes a disk unless you retype that disk's SERIAL NUMBER and
+  DEVICE PATH yourself.
+
+Pick the route that matches your system:
+  A. Ubuntu Linux 25.10 / 26.04 or newer   datawipe_0.1.0_amd64.deb
+  B. Other Linux                           datawipe-0.1.0-linux-x86_64.tar.gz
+  C. Windows (preview)                     datawipe-0.1.0-windows-x86_64-preview.zip
+  D. Any PC, incl. its own main disk       datawipe-0.1.0-live.iso
+
+Check the downloads first (Linux; on Windows: Get-FileHash <file>):
+    sha256sum -c SHA256SUMS --ignore-missing
+
+
+A. UBUNTU LINUX (25.10 / 26.04 or newer)
+----------------------------------------
+1. Install
+       sudo apt install ./datawipe_0.1.0_amd64.deb
+
+2. Safe trial on a test file (no real disk touched)
+       truncate -s 64M test.img
+       datawipe run test.img --identity /usr/share/datawipe/profiles/hdd_basic.json
+   You should see "Result SUCCESS", "Verification PASSED" and an SCI score,
+   and a certificate (.dwcert.json and .dwcert.pdf) next to test.img.
+
+3. Optional: create your organisation's signing key, so your certificates can
+   be proven to come from you
+       mkdir -p ~/datawipe-state/keys
+       datawipe keygen ~/datawipe-state/keys/myorg
+   Choose a passphrase of at least 12 characters. Give myorg.pub.pem to
+   anyone who checks your certificates. NEVER give out myorg.key.pem.
+
+4. Wipe a real disk with the guided menu
+   a. Plug in the disk and unmount its partitions (file manager: eject/unmount).
+   b. Start the menu:
+          sudo datawipe interactive --i-understand-this-is-destructive --state-dir ~/datawipe-state
+   c. Choose "3) WIPE a drive" and pick the disk number. Check the model,
+      size and serial carefully.
+   d. Read the plan screen: what will happen, the level (Clear or Purge),
+      rough duration, and whether the certificate will be signed.
+   e. Confirm, then retype the serial number and device path exactly as shown.
+   f. Wait. Ctrl-C pauses safely at any time; choose Wipe again with the same
+      disk to resume.
+   g. The result screen shows DONE and where the certificate, PDF and session
+      log were saved (in ~/datawipe-state).
+
+5. Check a certificate (anyone can do this)
+       datawipe verify-cert <certificate>.dwcert.json --pubkey myorg.pub.pem
+   A good certificate shows "Signature VALID, by the trusted key".
+
+
+B. OTHER LINUX DISTRIBUTIONS
+----------------------------
+       tar xzf datawipe-0.1.0-linux-x86_64.tar.gz
+       sudo cp -r datawipe-0.1.0-linux-x86_64/usr/* /usr/local/
+Then follow A, steps 2-5, using /usr/local/share/datawipe/profiles/ instead
+of /usr/share/datawipe/profiles/. Needs a recent system (glibc 2.38+,
+OpenSSL 3). If "datawipe --version" reports errors, use route D.
+
+
+C. WINDOWS (PREVIEW)
+--------------------
+1. Unzip, for example to C:\datawipe. Windows may warn that the program is
+   unrecognised (it is not code-signed yet): "More info" > "Run anyway" if you
+   trust where it came from.
+
+2. Safe trial on a test file (normal PowerShell, no Administrator needed)
+       cd C:\datawipe\datawipe-0.1.0-windows
+       fsutil file createnew test.img 67108864
+       .\datawipe.exe run test.img --identity profiles\hdd_basic.json
+
+3. Wipe a real disk (PowerShell AS ADMINISTRATOR)
+   a. Find the disk number:
+          Get-Disk
+   b. Take that disk offline (a disk with drive letters or partitions in use
+      is refused):
+          Set-Disk -Number N -IsOffline $true
+   c. Start the guided menu, then follow A, step 4c-4g:
+          .\datawipe.exe interactive --i-understand-this-is-destructive --state-dir C:\datawipe-state
+   d. When finished, bring the disk back online:
+          Set-Disk -Number N -IsOffline $false
+
+   Notes:
+   * The Windows version has NOT yet been tested on a real disk. Use a spare
+     disk only.
+   * Wipes are an overwrite (NIST Clear). Firmware erase (Purge) on SATA drives
+     needs --experimental added to the start command.
+   * NVMe and eMMC drives get Clear only. For Purge on those, use route D.
+
+
+D. ANY PC, INCLUDING ITS OWN MAIN DISK (bootable USB)
+-----------------------------------------------------
+1. Write the ISO to a USB stick (64 MB or more). This erases the stick.
+   * Windows: Rufus or balenaEtcher (in Rufus choose "DD image" mode if asked).
+   * Linux:   sudo dd if=datawipe-0.1.0-live.iso of=/dev/sdX bs=4M conv=fsync status=progress
+              (sdX = the USB stick; double-check it)
+
+2. Prepare a SECOND USB stick (FAT32, exFAT or ext4) to keep the certificates.
+   Without it they are lost when the PC switches off. If you made a signing
+   key, put it in a folder datawipe/keys/ on this stick.
+
+3. Boot the PC from the DataWipe stick (boot menu key, often F12, F11, Esc or
+   F8). Secure Boot can stay on.
+
+4. In the DataWipe menu:
+   a. "2) Choose state USB stick" and select the second stick.
+   b. "1) DataWipe", then "WIPE a drive", as in A, step 4c-4g.
+   c. If Secure Erase is reported "frozen", choose "Unfreeze drives" from the
+      main menu and try again.
+   d. When finished, "0) Power off" and remove both sticks. The certificates
+      are on the second stick under datawipe/.
+
+
+IF SOMETHING GOES WRONG
+-----------------------
+  REFUSED ... in use
+      Unmount the disk's partitions (Linux) or take the disk offline (Windows).
+  REFUSED ... serial number confirmation did not match
+      Retype the serial exactly as displayed, including dashes and capitals.
+  INTERRUPTED / PAUSED
+      Run the same wipe again and choose resume.
+  ONE MORE RUN NEEDED (hidden area removed)
+      Restart or replug the disk if asked, then wipe it again.
+  NOT VERIFIED
+      Do NOT treat the disk as clean; run the wipe again.
+  Disk locked after an interrupted Secure Erase
+      datawipe ata-unlock <disk> --i-understand-this-is-destructive --experimental
+
+Full manual: README.md (in every package; /usr/share/doc/datawipe/ after
+installing on Linux) and "man datawipe" on Linux.
+DataWipe is MIT-licensed; see LICENSE.

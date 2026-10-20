@@ -151,6 +151,8 @@ def build_iso(datawipe: Path, out: Path):
         shutil.copy(kcache / "vmlinuz", tree / "boot/vmlinuz")
         shutil.copy(build_initramfs(work, kcache, datawipe), tree / "boot/initrd.gz")
         shutil.copy(REPO / "iso/grub.cfg", tree / "boot/grub/grub.cfg")
+        # Readable when the stick or CD is opened on any computer, before booting it.
+        shutil.copy(REPO / "packaging/QUICKSTART.txt", tree / "QUICKSTART.txt")
         # Ubuntu's signed CD GRUB finds its filesystem by /.disk/info, then reads /boot/grub/grub.cfg.
         (tree / ".disk/info").write_text(f"DataWipe {version} live amd64\n")
 

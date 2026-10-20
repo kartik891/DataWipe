@@ -116,7 +116,7 @@ include(GNUInstallDirs)
 install(TARGETS datawipe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY profiles/ DESTINATION ${CMAKE_INSTALL_DATADIR}/datawipe/profiles FILES_MATCHING PATTERN "*.json")
 install(PROGRAMS scripts/hardware_test.sh DESTINATION ${CMAKE_INSTALL_DATADIR}/datawipe)
-install(FILES README.md LICENSE packaging/copyright DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/datawipe)
+install(FILES README.md LICENSE packaging/copyright packaging/QUICKSTART.txt DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/datawipe)
 add_custom_command(OUTPUT datawipe.1.gz
   COMMAND gzip -9nc ${CMAKE_SOURCE_DIR}/doc/datawipe.1 > datawipe.1.gz
   DEPENDS doc/datawipe.1 VERBATIM)

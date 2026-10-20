@@ -41,12 +41,14 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
     z.write(here / "README.md", f"{top}/README.md")
     z.write(here / "packaging/copyright", f"{top}/copyright.txt")
     z.write(here / "LICENSE", f"{top}/LICENSE.txt")
+    z.write(here / "packaging/QUICKSTART.txt", f"{top}/QUICKSTART.txt")
     for p in sorted((here / "profiles").glob("*.json")):
         z.write(p, f"{top}/profiles/{p.name}")
 PY
 else
     echo "(no Windows toolchain: skipping the Windows preview; see scripts/win_toolchain.sh)"
 fi
+cp "$here/packaging/QUICKSTART.txt" "$D/QUICKSTART.txt"  # next to the packages, for whoever receives them
 (cd "$D" && sha256sum -- * >SHA256SUMS)
 echo
 echo "release $ver in $D:"
