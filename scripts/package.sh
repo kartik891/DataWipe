@@ -49,6 +49,7 @@ else
     echo "(no Windows toolchain: skipping the Windows preview; see scripts/win_toolchain.sh)"
 fi
 cp "$here/packaging/QUICKSTART.txt" "$D/QUICKSTART.txt"  # next to the packages, for whoever receives them
+cp "$here/DEPENDENCIES.txt" "$D/DEPENDENCIES.txt"
 (cd "$D" && sha256sum -- * >SHA256SUMS)
 echo
 echo "release $ver in $D:"

@@ -1,0 +1,136 @@
+DataWipe 0.1.0 - LIBRARIES AND DEPENDENCIES
+===========================================
+
+Everything used to build, test and package the whole project, with the versions
+the 0.1.0 release was built with (Ubuntu 26.04 LTS, x86-64). Newer versions
+are expected to work; much older ones may not (C++20 <format> needs GCC 13+).
+
+"pkg:" names are Ubuntu/Debian packages (sudo apt install <pkg>).
+
+
+1. LIBRARIES LINKED INTO DATAWIPE
+---------------------------------
+  OpenSSL libcrypto 3.x        Ed25519 signatures (TECC), SHA-256, key files (PEM,
+                               AES-256 encrypted). Headers: openssl/evp.h, pem.h,
+                               sha.h, err.h. The only third-party library.
+      Linux:   dynamic, 3.5.5          pkg: libssl-dev (build), libssl3t64 (run)
+      Windows: static, 3.5.5, built from the official source release
+               (openssl-3.5.5.tar.gz, sha256 b28c9153...bc2a89)
+  C++ standard library         libstdc++ (GCC), libgcc_s, glibc
+      Linux run-time (from the .deb's Depends):
+               libc6 (>= 2.38), libgcc-s1, libstdc++6 (>= 15), libssl3t64 (>= 3.0)
+      Windows: linked statically; datawipe.exe needs only DLLs Windows ships
+               (kernel32, advapi32, bcrypt, crypt32, user32, ws2_32, msvcrt)
+  Linux kernel interfaces      SG_IO, NVMe admin ioctl, MMC_IOC_CMD, BLK* ioctls,
+                               /sys, /proc (kernel headers come with libc6-dev)
+  Windows APIs                 Win32 file/volume APIs, DeviceIoControl
+                               (IOCTL_STORAGE_*, IOCTL_DISK_*, IOCTL_VOLUME_*,
+                               IOCTL_SCSI_PASS_THROUGH_DIRECT), BCryptGenRandom
+
+  Written in-house (no library): JSON, ChaCha20, SHA-256 (fallback), PDF writer,
+  ATA/NVMe/eMMC command encoding, ARVS, SCI, hash chain.
+
+
+2. BUILDING DATAWIPE ON LINUX
+-----------------------------
+  GCC (g++) with C++20          15.2.0 (13 or newer)      pkg: g++
+  CMake                         4.2.3  (3.20 or newer)    pkg: cmake
+  GNU make or Ninja             any                       pkg: make / ninja-build
+  OpenSSL development files     3.5.5  (3.0 or newer)     pkg: libssl-dev
+  gzip                          1.14 (compresses the man page)  pkg: gzip
+
+    cmake -S . -B build && cmake --build build -j
+
+
+3. TESTS
+--------
+  Unit suites and image end-to-end (ctest):
+    bash 5.3, coreutils (md5sum, truncate, dd), grep, sed
+  Loop-device end-to-end (sudo scripts/e2e.sh --loop):
+    util-linux 2.41 (losetup)                           pkg: util-linux
+  QEMU drive bench (scripts/qemu_bench.py) and live-image boot tests (iso_test.py):
+    Python                      3.14  (3.10 or newer; standard library only)
+    QEMU with KVM               10.2.1                  pkg: qemu-system-x86
+    BusyBox, statically linked  1.37.0                  pkg: busybox-static
+    cpio                        2.15                    pkg: cpio
+    zstd                        1.5.7                   pkg: zstd
+    e2fsprogs (mkfs.ext4)       1.47.2                  pkg: e2fsprogs
+    dosfstools (mkfs.vfat)      4.2                     pkg: dosfstools
+    util-linux (mkswap, blkid)  2.41                    pkg: util-linux
+    file                        5.46                    pkg: file
+    OVMF UEFI firmware, incl.   2025.11                 pkg: ovmf
+      the Secure Boot variant with Microsoft keys (OVMF_*_4M.ms.fd)
+    apt-get, dpkg-deb           (fetches this machine's kernel packages,
+                                 linux-image-<ver> and linux-modules-<ver>,
+                                 into ~/.cache/datawipe-bench; release built
+                                 with kernel 7.0.0-38-generic)
+    /dev/kvm access
+
+
+4. LIVE IMAGE (make iso / scripts/build_iso.py)
+-----------------------------------------------
+  Installed on the build machine:
+    shim-signed                 1.59+15.8               Microsoft-signed shim
+    grub-efi-amd64-signed       1.215+2.14              Ubuntu-signed GRUB
+    grub-common, grub-efi-amd64-bin 2.14                (grub-mkimage)
+    dosfstools, busybox-static, cpio, util-linux (blkid), bash, file
+    Ubuntu kernel + modules     same packages as the QEMU bench
+  Fetched automatically with apt-get download into ~/.cache/datawipe-build
+  (no root needed) if not installed:
+    xorriso, libisoburn1t64, libisofs6t64, libburn4t64, mtools, grub-pc-bin
+  Kernel modules packed into the image:
+    nvme, ahci, sdhci-pci, sdhci-acpi, mmc_block, mpt3sas, megaraid_sas, hpsa,
+    usb-storage, uas, usbhid, hid-generic, exfat, nls_iso8859_1, nls_utf8
+    (plus their dependencies, resolved with modinfo)
+  Copied into the image with their shared libraries: datawipe, bash, blkid
+
+
+5. PACKAGES (scripts/package.sh)
+--------------------------------
+  CPack (part of CMake)         .deb and .tar.gz
+  dpkg-deb 1.23.7, dpkg-shlibdeps                       pkg: dpkg-dev
+  Python 3 (zipfile)            Windows zip
+  sha256sum (coreutils)         SHA256SUMS
+
+
+6. WINDOWS BUILD (scripts/win_toolchain.sh, scripts/win_build.sh)
+-----------------------------------------------------------------
+  Fetched without root into ~/.cache/datawipe-win:
+    MinGW-w64 cross-compiler, GCC 13.2 (posix threads):
+      g++-mingw-w64-x86-64-posix          13.2.0-6ubuntu1+26.1
+      gcc-mingw-w64-x86-64-posix          13.2.0-6ubuntu1+26.1
+      gcc-mingw-w64-x86-64-posix-runtime  13.2.0-6ubuntu1+26.1
+      gcc-mingw-w64-base                  13.2.0-6ubuntu1+26.1
+      binutils-mingw-w64-x86-64           2.45.90.20260125-1ubuntu1+13.3
+      mingw-w64-x86-64-dev, mingw-w64-common  13.0.0-2ubuntu1
+    OpenSSL 3.5.5 source (github.com/openssl/openssl releases), built as
+      a static libcrypto for mingw64; needs perl and make on the build machine
+    Wine (only to run the Windows tests on Linux):
+      wine64, libwine, wine-common        10.0~repack-12ubuntu1
+      libz-mingw-w64                      1.3.1+dfsg-2
+  Also needed: curl, python3, cmake
+
+  Native Windows build (as in CI, .github/workflows/ci.yml): MSYS2 MINGW64 with
+    mingw-w64-x86_64-gcc, -cmake, -ninja, -openssl, and gzip
+
+
+7. CONTINUOUS INTEGRATION (.github/workflows/ci.yml)
+----------------------------------------------------
+  GitHub Actions: ubuntu-24.04 (g++-14, cmake, libssl-dev, qemu-system-x86,
+  busybox-static, ovmf, xorriso, mtools, dosfstools, python3) and
+  windows-latest (msys2/setup-msys2 as above). Actions used:
+  actions/checkout@v4, actions/cache@v4, actions/upload-artifact@v4,
+  msys2/setup-msys2@v2.
+
+
+8. ONE-LINE SETUP (Ubuntu)
+--------------------------
+  Build and unit tests:
+    sudo apt install g++ cmake make libssl-dev gzip
+  Everything (QEMU bench, live image, packages):
+    sudo apt install g++ cmake make libssl-dev gzip python3 qemu-system-x86 \
+        busybox-static cpio zstd e2fsprogs dosfstools util-linux file ovmf \
+        shim-signed grub-efi-amd64-signed grub-efi-amd64-bin grub-common dpkg-dev \
+        xorriso mtools grub-pc-bin
+  Windows cross-build (no root):
+    scripts/win_toolchain.sh
