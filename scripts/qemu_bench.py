@@ -41,7 +41,7 @@ PASSPHRASE = "bench passphrase, not a secret"
 FLAG = "--i-understand-this-is-destructive"
 PLAINTEXT = b"DATAWIPE-TEST"
 EMMC_BOOT = 1 << 20  # each of the two eMMC boot partitions
-STEP_TIMEOUT = 180  # seconds; the slowest step (1 GiB verified wipe) takes a few
+STEP_TIMEOUT = 180  # seconds per step by default; the slowest step (1 GiB verified wipe) takes a few
 
 
 class Setup(Exception):
@@ -138,8 +138,9 @@ def plaintext_count(path: Path) -> int:
 
 
 class Step:
-    def __init__(self, name, cmd, rc, answers=(), interrupt=None, expect=(), forbid=()):
+    def __init__(self, name, cmd, rc, answers=(), interrupt=None, expect=(), forbid=(), timeout=STEP_TIMEOUT):
         self.name, self.cmd, self.rc = name, cmd, rc
+        self.timeout = timeout
         self.answers = list(answers)  # (prompt regex, reply), in order
         self.interrupt = interrupt    # (regex, delay seconds): press Ctrl-C after it appears
         self.expect, self.forbid = list(expect), list(forbid)
@@ -187,7 +188,9 @@ def steps():
              expect=[r"Identity source\s+emmc-ext-csd", r"Classification\s+eMMC"]),
         Step("refused: an eMMC boot partition as target", f"datawipe run /dev/mmcblk0boot0 {FLAG}", 2,
              expect=[r"eMMC hardware partition"], forbid=[SERIAL_PROMPT]),
-        Step("eMMC wipe", f"datawipe run /dev/mmcblk0 {FLAG} --cert /work/emmc.json", 0,
+        # QEMU's eMMC is an emulated SD host controller doing PIO: under host load it has run as
+        # slowly as 0.4 MiB/s, i.e. about 6 minutes for the two passes over 64 MiB.
+        Step("eMMC wipe", f"datawipe run /dev/mmcblk0 {FLAG} --cert /work/emmc.json", 0, timeout=900,
              answers=[(SERIAL_PROMPT, "0xdeadbeef"), (PATH_PROMPT, "/dev/mmcblk0")],
              expect=[r"hardware partitions outside the user area are NOT covered", r"REAL DEVICE: running this plan destroys",
                      r"boot 2048 KiB", r"Result\s+SUCCESS", r"Verification\s+PASSED"]),
@@ -257,7 +260,7 @@ def build_initramfs(work: Path, cache: Path, datawipe: Path, all_steps) -> Path:
     return image
 
 
-def boot_and_drive(work: Path, cache: Path, initramfs: Path, all_steps, timeout=900):
+def boot_and_drive(work: Path, cache: Path, initramfs: Path, all_steps, timeout=2400):
     qemu = [
         "qemu-system-x86_64", "-enable-kvm", "-cpu", "host", "-m", "1024", "-display", "none", "-monitor", "none",
         "-serial", "stdio", "-no-reboot",
@@ -331,9 +334,10 @@ def boot_and_drive(work: Path, cache: Path, initramfs: Path, all_steps, timeout=
                     time.sleep(0.2)
                     p.stdin.write(b"\n")
                     cur.unexpected_prompts += 1
-                if not cur.timed_out and time.time() - cur.started > STEP_TIMEOUT:
+                if not cur.timed_out and time.time() - cur.started > cur.timeout:
                     cur.timed_out = True
-                    p.stdin.write(b"\x03\n")
+                    # Ctrl-C only: a newline here would be read as the NEXT step's first answer.
+                    p.stdin.write(b"\x03")
                 if getattr(cur, "_int_pending", False) and re.search(cur.interrupt[0], cur.out):
                     cur._int_pending = False
                     ctrl_c_at = time.time() + cur.interrupt[1]
@@ -415,7 +419,7 @@ def main():
             if s.unexpected_prompts:
                 problems.append(f"{s.unexpected_prompts} confirmation prompt(s) the scenario did not expect")
             if s.timed_out:
-                problems.append(f"no result within {STEP_TIMEOUT} s")
+                problems.append(f"no result within {s.timeout} s")
             if s.got != s.rc:
                 problems.append(f"exit {s.got}, expected {s.rc}")
             problems += [f"missing /{x}/" for x in s.expect if not re.search(x, s.out)]

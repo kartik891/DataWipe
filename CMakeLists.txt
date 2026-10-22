@@ -101,7 +101,7 @@ set_tests_properties(e2e_image PROPERTIES
 # Real kernel drivers against emulated SATA/NVMe drives in a throwaway VM (needs KVM,
 # busybox-static, QEMU; downloads this machine's kernel package once). Skips otherwise.
 add_test(NAME qemu_bench COMMAND ${CMAKE_SOURCE_DIR}/scripts/qemu_bench.py --datawipe $<TARGET_FILE:datawipe>)
-set_tests_properties(qemu_bench PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1500)
+set_tests_properties(qemu_bench PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 2700)
 
 # The live image (UEFI + Secure Boot, BIOS; CD or USB): `make iso`. Its boot tests run the
 # image in QEMU under real Secure Boot firmware and wipe a disk through the live menu.
