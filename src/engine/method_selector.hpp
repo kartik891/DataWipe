@@ -5,8 +5,6 @@
 //
 //  HDD            Clear : host PRNG overwrite (REAL)
 //                 Purge : ATA SECURITY ERASE UNIT enhanced  > SANITIZE OVERWRITE EXT > SE normal
-//                         (device command EMULATED: logged, and its effect reproduced by a real
-//                          host pass so read-back verification remains meaningful)
 //  SSD, encrypted Purge : crypto erase  [SATA: SANITIZE CRYPTO SCRAMBLE > TCG Opal GenKey]
 //                                       [NVMe: SANITIZE Crypto Erase  > FORMAT NVM SES=2]
 //                         + block erase afterwards if supported (defense in depth: a buggy SED
@@ -16,7 +14,14 @@
 //                 Clear : NVMe FORMAT SES=1, else host overwrite (flash over-provisioning means
 //                         a host overwrite can never be Purge)
 //  eMMC           Purge : BLKDISCARD all + eMMC SANITIZE;  else Clear via host overwrite
-//  All SSD/eMMC device commands are SIMULATED in this build.
+//
+//  Execution of device-command steps depends on the identity:
+//    real drive (hardware identity)  REAL: sent to the drive; no host pass stands in for it
+//    simulated profile, HDD          EMULATED: logged, and its effect reproduced by a real host
+//                                    pass so read-back verification remains meaningful
+//    simulated profile, SSD/eMMC     SIMULATED: logged only; the medium is not changed
+//  Commands not validated on hardware are masked out beforehand unless --experimental
+//  (engine/command_support.hpp).
 //
 //  SATA HPA/DCO   Prepended step removes them so every rung covers the whole medium. If the
 //                 caller opts out, the plan is capped at Clear and says why.

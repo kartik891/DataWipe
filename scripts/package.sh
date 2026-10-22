@@ -50,6 +50,7 @@ else
 fi
 cp "$here/packaging/QUICKSTART.txt" "$D/QUICKSTART.txt"  # next to the packages, for whoever receives them
 cp "$here/DEPENDENCIES.txt" "$D/DEPENDENCIES.txt"
+cp "$here/HOW_IT_WORKS.txt" "$D/HOW_IT_WORKS.txt"
 (cd "$D" && sha256sum -- * >SHA256SUMS)
 echo
 echo "release $ver in $D:"

@@ -1,0 +1,473 @@
+DataWipe 0.1.0 - HOW THE CODE WORKS
+===================================
+
+This document explains what the program does, how it is organised, and what
+happens step by step when a disk is wiped, with the source file for each part.
+Paths are relative to the project folder. For using the program see
+QUICKSTART.txt; for build requirements see DEPENDENCIES.txt.
+
+Contents
+   1. What DataWipe does
+   2. Source layout
+   3. The life of one wipe (datawipe run)
+   4. Stage 1: the safety guard - may this target be touched at all?
+   5. Stage 2: detection and classification
+   6. Stage 3: method selection - the wipe plan
+   7. Stage 4: the physical-disk gate
+   8. Stage 5: the journal and resuming
+   9. Stage 6: execution - overwrite engine and device commands
+  10. Stage 7: verification - ARVS, oracles, re-wipe, SCI
+  11. Stage 8: the certificate - TECC hash chain, Ed25519, PDF
+  12. Other commands
+  13. Platform layers: Linux and Windows
+  14. The guided mode
+  15. The live image
+  16. Tests
+  17. Glossary
+
+
+1. WHAT DATAWIPE DOES
+---------------------
+DataWipe sanitizes a storage device (HDD, SATA SSD, NVMe SSD, eMMC) so that the
+data on it cannot be recovered, then PROVES what it did:
+
+  erase      with the strongest method the drive supports and this build may use:
+             host overwrite (NIST SP 800-88 "Clear"), or firmware commands such as
+             ATA Secure Erase, SANITIZE or NVMe Format ("Purge");
+  verify     by reading a risk-weighted sample of the disk back (ARVS) and scoring
+             the result (SCI, 0-100);
+  certify    with a certificate whose whole session history is a SHA-256 hash
+             chain, signed with the organisation's Ed25519 key (TECC), as JSON and
+             PDF.
+
+Targets: image files and loop devices (for trials and tests; they stand in for a
+drive described by a JSON "profile"), and real disks.
+
+
+2. SOURCE LAYOUT
+----------------
+  src/core/      building blocks with no device knowledge
+                   json.*          JSON parser/writer; canonical compact form for hashing
+                   chacha20.*      ChaCha20 stream cipher (pattern and random numbers)
+                   chacha_rng.hpp  reproducible random numbers from a seed
+                   sha256.*        SHA-256 (OpenSSL's is used where speed matters)
+                   cancel.*        Ctrl-C handling: a flag polled between chunks
+                   result.hpp      Result<T>: a value or an error, no exceptions
+                   log.*           timestamped log lines
+                   portable.hpp    aligned buffers, atomic file replace, path separators
+  src/device/    finding out what the target is
+                   safety_guard.*  decides whether a path may be opened at all
+                   device_factory.*  the only way to open a target (runs the guard)
+                   block_device.*  read/write/flush interface over a file descriptor
+                   image_device.cpp, loop_device.cpp  backends
+                   sysfs.*         Linux /sys and /proc readers (mounts, swap, serial)
+                   ata_identity.*, ata_taskfile.*  ATA IDENTIFY decoding, command blocks
+                   passthrough*    sending query/command blocks to the drive
+                   hw_identity.*   ATA / NVMe / eMMC identity providers, detection
+                   classifier.*    identity + geometry -> DeviceProfile (media type etc.)
+                   win_storage.*   decoding Windows storage descriptors (portable)
+  src/engine/    deciding and doing the wipe
+                   method_selector.*  DeviceProfile -> WipePlan (pure function)
+                   command_support.*  which commands are proven/experimental/unsupported
+                   wipe_plan.*, device_command.*  plan and command data structures
+                   pattern.*       the overwrite pattern (position-derived)
+                   overwrite_engine.*  the host overwrite loop
+                   plan_executor.*  runs the plan's steps in order
+                   simulated_executor.*  drive state machine for simulated profiles
+                   passthrough_executor.cpp  sends commands to real drives
+                   run_journal.*   resume journal
+  src/verify/    proving the result
+                   risk_model.*    ARVS risk factors, AHP weights, method priors
+                   arvs_sampler.*, sector_sampler.*  which sectors to read back
+                   readback_verifier.*  reads, compares, re-wipes
+                   fingerprint.*   pre-wipe hashes for firmware erases
+                   sci.*           Sanitization Confidence Index
+  src/cert/      certificate.* (JSON), pdf.* (PDF 1.4 writer)
+  src/tecc/      session_chain.* (hash chain), ed25519.* (keys and signatures)
+  src/platform/  Windows only: win_compat.* (POSIX gaps), win_device.* (disks)
+  src/cli/       main.cpp (commands), interactive.cpp (guided menu), cli.hpp
+  tests/         unit test programs (one per area)
+  scripts/       e2e.sh, qemu_bench.py, build_iso.py, iso_test.py, package.sh,
+                 hardware_test.sh, win_toolchain.sh, win_build.sh, wine_run.sh
+  iso/           the live system's init, menu and GRUB configuration
+  profiles/      simulated drive profiles (JSON)
+
+
+3. THE LIFE OF ONE WIPE (datawipe run)
+--------------------------------------
+The run command (src/cli/main.cpp, cmd_run) goes through these stages. Every
+refusal happens before anything is written, and as early as possible.
+
+   target path
+       |
+   [1] safety guard ............ may this path be opened? what kind of target?
+   [2] read-only detection ..... identity, geometry, classification -> DeviceProfile
+   [3] method selection ........ DeviceProfile -> WipePlan (steps, level, verification)
+   [4] physical-disk gate ...... flag + not in use + operator retypes serial and path
+   [5] journal ................. fresh start, --resume or --restart
+       reopen writable ......... the guard runs again; the plan must come out identical
+       TECC session chain ...... "detection" and "plan" entries
+       (pre-wipe fingerprints, if the plan ends in a firmware erase)
+   [6] execution ............... steps in order: device commands / host overwrite passes
+   [7] verification ............ ARVS read-back, re-wipe of failures, SCI
+   [8] certificate ............. last chain entry, signed; JSON + PDF + session log
+       journal removed, report printed, exit code set
+
+Exit codes: 0 done, 1 usage, 2 refused, 3 detection failed, 4 not supported,
+5 error, 6 a step failed, 7 interrupted (resumable), 8 verification or
+certificate check failed, 10 hidden area removed (run again).
+
+
+4. STAGE 1: THE SAFETY GUARD (src/device/safety_guard.cpp)
+----------------------------------------------------------
+assess_target(path) looks at the path BEFORE any file descriptor exists and
+returns a TargetAssessment (kind, canonical path, what uses it), or a refusal:
+
+  Regular file   allowed if owned by the invoking user, non-empty, a multiple of
+                 512 bytes, and not attached to a loop device (then use the loop).
+  Loop device    allowed if attached to a regular file owned by the invoking user
+                 (this is what rejects the system's own snap loop devices), and
+                 nothing is mounted or stacked on it.
+  Partition      always refused: sanitization is whole-device.
+  Other block    classified as a PHYSICAL disk. Read-only detection is allowed even
+  device         while mounted; writing needs a PhysicalOverride (stage 4) and a disk
+                 nothing uses. "In use" = any mounted partition, active swap, or a
+                 holder (LVM, RAID, device-mapper), read from /proc and /sys.
+  Anything else  refused.
+
+open_target() (device_factory.cpp) runs the guard again, opens the target, then
+checks that the inode opened is the inode assessed (protection against the path
+being swapped in between: "time of check / time of use"). Writable opens of a
+physical disk use O_EXCL, which the kernel refuses while any partition is
+mounted or claimed. Only device_factory may construct device objects.
+
+
+5. STAGE 2: DETECTION AND CLASSIFICATION
+----------------------------------------
+Simulated targets (images, loops): the identity comes from the --identity
+profile (simulated_identity.cpp).
+
+Real disks (hw_identity.cpp, detect_physical): the disk is opened read-only and
+asked with QUERY commands only. ReadOnlyPassthrough (passthrough.cpp) enforces a
+whitelist; any command that could change the drive is refused in code before
+it is sent.
+  SATA   ATA IDENTIFY DEVICE (model, serial, capacity, Security and SANITIZE
+         support, rotation rate, TRIM, erase time estimates), READ NATIVE MAX
+         ADDRESS (reveals an HPA), DEVICE CONFIGURATION IDENTIFY (reveals a DCO),
+         TCG Level 0 Discovery (self-encrypting drives). Sent as ATA PASS-THROUGH
+         (16) command blocks; through USB bridges too, when they implement SAT.
+  NVMe   Identify Controller and Namespace (Sanitize/Format capabilities, wear
+         "Percentage Used", namespace id and LBA format).
+  eMMC   EXT_CSD register via CMD8 (SANITIZE / secure erase support, boot, RPMB
+         and general-purpose partition sizes, life-time estimate).
+  If the drive cannot be asked (no root, a bridge without SAT), a weaker identity
+  from /sys is used and marked as such; it is never enough to write to the disk.
+
+classify() (classifier.cpp) combines identity and measured geometry into a
+DeviceProfile:
+  * media type: NVMe -> SSD-NVMe, eMMC -> eMMC; SATA by rotation rate (1 = SSD,
+    an RPM value = HDD), else by TRIM support (flash has it, magnets do not);
+  * consistency checks: user-addressable <= native max <= DCO max; reported
+    capacity versus what the kernel can reach (USB bridges sometimes report fewer
+    sectors; those become "unreachable sectors");
+  * warnings: hidden area size, security FROZEN or LOCKED, no Purge method, and
+    every detail detection could not determine.
+
+
+6. STAGE 3: METHOD SELECTION (src/engine/method_selector.cpp)
+-------------------------------------------------------------
+select_method(profile, options) is a pure function (no I/O): the same profile
+always gives the same plan, which makes it fully testable. A WipePlan is a list
+of steps; each step has a level (None/Clear/Purge), device commands and/or a host
+overwrite range, an execution kind and a rationale. The first available rung of
+each ladder wins:
+
+  HDD              host pseudo-random overwrite (Clear), then ATA SECURITY ERASE
+                   enhanced > SANITIZE OVERWRITE > SECURITY ERASE normal (Purge)
+  SATA SSD         SANITIZE BLOCK ERASE > SANITIZE OVERWRITE > Secure Erase
+                   (Purge); else two host passes (Clear only: overwriting flash
+                   cannot reach remapped and over-provisioned blocks)
+  NVMe SSD         Sanitize Block Erase > Sanitize Overwrite (Purge); else Format
+                   NVM user-data erase (Clear); else two host passes
+  Self-encrypting  crypto erase first, block erase after it if supported
+  eMMC             discard + SANITIZE > secure erase (Purge); else two passes
+  HPA/DCO present  a first step removes them so every later step covers the whole
+                   medium; if that is not allowed the plan is capped at Clear and
+                   says so
+
+Before selection, mask_unvalidated_capabilities() (command_support.cpp) hides
+capabilities whose commands are not proven on real hardware, unless
+--experimental is given; the plan then falls back to a proven rung and lists
+what it left out. Proven today: host overwrite; ATA enhanced Secure Erase on an
+HDD (Linux); NVMe Format user-data erase (QEMU). On Windows every firmware
+command is experimental, and NVMe/eMMC commands are unsupported.
+
+Execution kind of each command step:
+  real drive          REAL: sent to the drive, no host pass imitates it
+  simulated HDD       EMULATED: logged, and its effect reproduced by a real host
+                      pass, so read-back verification stays meaningful
+  simulated SSD/eMMC  SIMULATED: logged only; the medium is not changed
+
+The plan also decides HOW it will be verified: PATTERN if a host overwrite
+writes last (each sector must equal the regenerated pattern), FINGERPRINT if a
+firmware erase writes last (each sampled sector must differ from its hash taken
+before the wipe), not applicable for a fully simulated plan.
+
+
+7. STAGE 4: THE PHYSICAL-DISK GATE (main.cpp physical_gate, safety_guard.cpp)
+------------------------------------------------------------------------------
+For a real disk, in this order (the cheap automatic refusals first, so nobody is
+asked to type for a disk that would be refused anyway):
+  1. the disk was identified with its own commands (not /sys only);
+  2. nothing uses it (mounts, swap, stacked devices; on Windows any volume, a
+     Storage Spaces pool or a dynamic disk);
+  3. --i-understand-this-is-destructive was given;
+  4. stdin is an interactive terminal (piped answers are refused);
+  5. the operator retypes the drive's SERIAL NUMBER, then its DEVICE PATH.
+Only confirm_physical_target() can create the PhysicalOverride object that a
+writable open requires. Then the disk is identified again from scratch and must
+report the same serial (reopen_physical), and is opened writable and exclusive.
+
+
+8. STAGE 5: THE JOURNAL AND RESUMING (src/engine/run_journal.cpp)
+-----------------------------------------------------------------
+Without a journal, a wipe stopped at 60% leaves a disk that is part pattern, part
+old data, and nothing records which part. The journal is a small JSON file:
+  * written BEFORE the first destructive action; names the medium, the drive's
+    serial, the exact plan (SHA-256 of its JSON) and the pattern key;
+  * advanced only after fdatasync confirms the data, so it may lag the disk but
+    never overstates it;
+  * replaced atomically (temp file, flush, rename, directory sync);
+  * a resume is refused unless medium, size, sector size, serial and plan digest
+    all match; a plain run is refused while a journal exists (choose --resume or
+    --restart);
+  * on resume the engine steps back by twice the sync interval and rewrites that
+    part, because some USB bridges hide the drive's write cache from the kernel;
+    the pattern is position-derived, so rewriting is exact;
+  * removed only after the certificate is written (it holds the pattern key).
+Location: next to the image file, or for a real disk in --state-dir, named
+datawipe-<model>-<serial>.dwjournal.
+
+
+9. STAGE 6: EXECUTION
+---------------------
+plan_executor.cpp runs the steps in order. It first "preflights" every device
+command: a refusal (unsupported, experimental without the flag, the drive's own
+rules would reject it) stops the plan before anything is sent. Failure is
+returned as data: a plan that stopped after a completed Clear pass has still
+achieved Clear, and the certificate says exactly that.
+
+The overwrite pattern (pattern.cpp): ChaCha20 keystream with a random 256-bit key
+per wipe, a different stream number per pass, and the block counter derived from
+the absolute byte offset. So the content of any sector is a pure function of
+(key, pass, position): a resumed pass writes exactly what an uninterrupted one
+would have, and the verifier can recompute any sector without storing anything.
+
+The overwrite engine (overwrite_engine.cpp), per pass:
+  * two aligned buffers: one chunk is written while the next is generated on a
+    helper thread, so a pass runs at the speed of the slower of the two;
+  * every sync interval (default 256 MiB): fdatasync (on a disk this also flushes
+    the drive's cache), then evict the written pages from the cache, then advance
+    the journal checkpoint. An fdatasync error is final for everything since the
+    last success; it is never retried and trusted;
+  * between chunks it checks the cancel flag: Ctrl-C stops at the next chunk,
+    flushes, and records progress (exit 7);
+  * --direct uses O_DIRECT (no page cache); buffers, offsets and lengths are then
+    aligned to the sector size.
+Progress shows speed and an ETA computed from data confirmed on the medium.
+
+Device commands (passthrough_executor.cpp) go to the drive as ATA PASS-THROUGH,
+NVMe admin, eMMC CMD6 or block-discard requests. Timeouts come from the drive:
+ATA Secure Erase uses twice the drive's own estimate (IDENTIFY words 89/90) plus
+30 minutes. SANITIZE is polled until it reports completion. Secure Erase first
+sets a fixed, documented temporary password ("DataWipeTmp"); the erase clears
+it, and if it is interrupted, "datawipe ata-unlock" removes it.
+
+Hidden areas: removing an HPA or DCO changes the disk's size, which the
+operating system has cached. That is done as a separate first run, which then
+asks the kernel to re-read the size and exits with code 10: "run again".
+
+For simulated profiles, simulated_executor.cpp is a state machine of the drive:
+it enforces the same rules firmware does (security states, "immediately
+preceded by" sequencing, SANITIZE signatures) and logs each command's exact
+encoding, without sending anything.
+
+
+10. STAGE 7: VERIFICATION (src/verify/)
+---------------------------------------
+Reading back the whole disk would double the time, so a sample is read. Which
+sample, and how big, is the job of ARVS (Adaptive Risk-Based Verification
+Sampling).
+
+Risk model (risk_model.cpp). The disk is cut into clusters; each gets
+    Risk = alpha*H + beta*W + gamma*F + delta*B + epsilon*E
+  H  1 if the cluster lay in a hidden area (HPA/DCO) before the wipe
+  W  flash wear (0 for HDDs)
+  F  probability the method left data although it reported success; measured
+     values from Wei et al. (FAST 2011) via the Jeffreys estimate (x+1/2)/(n+1),
+     stated assumptions elsewhere
+  B  closeness to a boundary: range edges, hidden-area edges, resume points
+  E  1 - how much the host can see of the method's result
+The weights alpha..epsilon come from the Analytic Hierarchy Process: a 5x5 matrix
+of pairwise judgements whose principal eigenvector gives the weights; its
+consistency ratio must be below 0.1.
+
+Sampler (arvs_sampler.cpp). The weights decide two different things:
+  HOW MUCH  budget = 5% x (1 + D), D = weighted mean of W, F, E: 5% for a
+            low-risk drive and method, up to 10%. (--verify-budget, --fixed-budget)
+  WHERE     a weighted random draw without replacement over all clusters
+            (Efraimidis-Spirakis keys), weight = small floor + weighted mean of
+            H and B. The floor keeps every cluster possible, so the result still
+            estimates the whole disk.
+The draw is a function of a recorded seed, so an auditor can regenerate exactly
+which clusters were read. The alternative --sampler uniform draws single sectors
+uniformly (the comparison baseline).
+
+Oracles (readback_verifier.cpp) say whether a sector read is acceptable:
+  PatternOracle      equals the pattern regenerated from key, pass and position;
+  FingerprintOracle  differs from its pre-wipe hash (fingerprint.cpp: before a
+                     firmware erase, every sampled sector is hashed, 64 bits of
+                     SHA-256, stored in a .dwfp file; sectors that held one repeated
+                     byte are ignored, since erased and untouched look the same).
+Reads go through a separate read-only handle with O_DIRECT where possible, so
+data comes from the disk and not from memory.
+
+Re-wipe (Stage 6 of the paper's workflow): a failing cluster is overwritten again,
+flushed and re-read, up to --rewipe-attempts times; sectors that still fail are
+reported NOT VERIFIED. A repaired cluster makes the status "Repaired", not
+"Passed": a failure in the sample means unsampled areas may have failed too.
+
+SCI (sci.cpp), computed from the FIRST reads (before any re-wipe):
+    SCI = (Wc x V + Wr x R) / (Wc + Wr) x 100,  Wc = 1/(1+lambda), Wr = lambda/(1+lambda)
+  V = pass rate of baseline clusters, R = pass rate of high-risk clusters
+  (H = 1 or B >= 0.5), lambda = 3 by default: a high-risk failure costs three
+  times a baseline one.
+Verification can be interrupted too: the journal is kept, and --resume repeats
+only the verification.
+
+
+11. STAGE 8: THE CERTIFICATE (src/cert/, src/tecc/)
+---------------------------------------------------
+Session chain (session_chain.cpp). Every session writes a log, <base>.dwlog.jsonl,
+one JSON line per stage: detection, plan, (fingerprints), execution or
+interrupted -> resume -> ... -> execution, verification, certificate.
+    H0 = SHA-256("DataWipe-TECC-genesis-v1" 0x00 || session id)
+    Hi = SHA-256(H(i-1) || compact JSON of entry i)
+Changing, removing, reordering or inserting any entry changes every later hash.
+Each append is flushed to disk before it counts. On resume the whole file is
+re-checked against the hash recorded in the journal, so a log edited while the
+wipe was paused is refused.
+
+Certificate (certificate.cpp). The body records the device identity, method,
+standards, what each step really did (REAL / EMULATED / SIMULATED), the NIST
+level achieved, the verification details and SCI, the session id and the time.
+It is appended to the chain as its LAST entry, so the terminal hash covers the
+whole history and the certificate itself.
+
+Signature (ed25519.cpp, OpenSSL). The terminal hash is signed with Ed25519 over
+"DataWipe-TECC-v1" 0x00 || hash (domain separation). Keys are made per
+organisation with "datawipe keygen": the private key is PKCS#8 PEM encrypted with
+AES-256 under a passphrase; the public key is published for auditors. Without a
+key the certificate is UNSIGNED: integrity can be checked, origin cannot.
+
+Outputs: <base>.dwcert.json (the signed record), <base>.dwcert.pdf (a readable
+PDF 1.4 with the signed JSON attached, pdf.cpp) and the session log.
+
+What verify-cert proves:
+  certificate alone          not modified since issue; signed by the key it names
+  + --pubkey (trusted key)   issued by THAT organisation (forgery)
+  + --log (session log)      the whole history is exactly what was hashed
+  serial + session id in the signed body: replay on another device is detected.
+
+
+12. OTHER COMMANDS (src/cli/main.cpp)
+-------------------------------------
+  probe        stage 2 only; prints the profile (read-only)
+  plan         stages 2-3; prints the plan, touches nothing
+  verify       re-reads a wiped medium later against its certificate (a fresh
+               random sample; the pattern key is in the certificate)
+  verify-cert  checks seal, signature, trusted key and session log
+  keygen       creates an organisation signing key pair
+  ata-unlock   removes the temporary ATA password an interrupted Secure Erase
+               left (through the same physical-disk gate)
+  interactive  the guided menu (also: datawipe with no arguments on a terminal)
+
+
+13. PLATFORM LAYERS
+-------------------
+Linux (device/sysfs.cpp, loop_device.cpp, passthrough_linux.cpp): ioctls SG_IO
+(ATA/SCSI pass-through), NVME_IOCTL_ADMIN_CMD, MMC_IOC_CMD, BLKDISCARD /
+BLKSECDISCARD, BLKGETSIZE64 and sector-size queries, HDIO_GET_IDENTITY, loop
+status; /proc/self/mountinfo and /proc/swaps for "in use".
+
+Windows (src/platform/, device/win_storage.cpp):
+  * win_compat: the POSIX calls the portable code uses (pread/pwrite on Win32
+    handles, fdatasync = FlushFileBuffers, binary file mode, atomic replace);
+  * disks are named \\.\PhysicalDriveN; volumes (\\.\C:) are always refused;
+  * identity from IOCTL_STORAGE_QUERY_PROPERTY (model, serial, bus, seek penalty,
+    TRIM) and the drive geometry; for SATA, ATA IDENTIFY and the other queries
+    through IOCTL_SCSI_PASS_THROUGH_DIRECT with the same command blocks as Linux;
+  * "in use" = any volume with an extent on the disk, the Windows system disk,
+    a Storage Spaces pool member or a dynamic disk (from the partition table);
+    the fix is to take the disk offline;
+  * disks are opened unbuffered with write-through.
+Built by cross-compiling with MinGW-w64 into one static datawipe.exe.
+
+
+14. THE GUIDED MODE (src/cli/interactive.cpp)
+---------------------------------------------
+A menu over the same commands, adding no capability and removing no check: a
+wipe still goes through cmd_run and its gate. It lists drives (physical ones
+only when started with the destructive flag), shows a plain-language plan with
+the level and a rough duration (an assumption from drive type and USB speed),
+offers resume / start over for an interrupted wipe, and ends with a result
+screen (DONE, PAUSED, NOT VERIFIED, REFUSED, FAILED) and the next step.
+
+
+15. THE LIVE IMAGE (scripts/build_iso.py, iso/)
+-----------------------------------------------
+A bootable ISO for wiping any PC, including its own system disk. It boots on
+UEFI with Secure Boot (Ubuntu's Microsoft-signed shim, signed GRUB, signed
+kernel; kernel lockdown is active), UEFI without it, and legacy BIOS, from USB
+or CD. It runs entirely from RAM: a BusyBox + bash initramfs with datawipe, the
+storage drivers and a menu (iso/datawipe-menu). A second USB stick holds the
+journals, certificates and signing key, so they survive power-off.
+
+
+16. TESTS
+---------
+  tests/test_*.cpp    unit suites: JSON, ATA decoding, the guard, plans and
+                      command encoding, the drive state machine, the overwrite
+                      engine and journal, verification, ARVS, TECC, Windows
+                      descriptor decoding
+  scripts/e2e.sh      the CLI end to end on image files (or loop devices with
+                      --loop): wipe, verify, tamper detection, interrupt/resume,
+                      refusals, guided mode
+  scripts/qemu_bench.py  a throwaway virtual machine with emulated SATA, NVMe and
+                      eMMC drives and the real kernel drivers: real-drive
+                      detection, the gate driven through a serial console, wipes
+  scripts/iso_test.py boots the live image under Secure Boot, BIOS and UEFI, and
+                      wipes a disk through its menu
+  scripts/hardware_test.sh  for spare physical drives: how a command becomes
+                      "proven"
+  scripts/win_build.sh --test  the Windows build's suites under Wine
+  .github/workflows/ci.yml   all of the above on GitHub Actions, plus a native
+                      Windows runner
+Run: cd build && ctest
+
+
+17. GLOSSARY
+------------
+  Clear / Purge   NIST SP 800-88 levels: Clear resists simple recovery tools;
+                  Purge resists laboratory recovery
+  HPA / DCO       Host Protected Area / Device Configuration Overlay: capacity a
+                  drive hides from the host
+  FTL             Flash Translation Layer: maps logical blocks to NAND pages
+  SAT             SCSI/ATA Translation: carrying ATA commands in SCSI commands
+  ARVS            Adaptive Risk-Based Verification Sampling
+  SCI             Sanitization Confidence Index
+  TECC            the certificate scheme: hash-chained session + Ed25519 signature
+  AHP             Analytic Hierarchy Process (weights from pairwise comparisons)
+  Profile         JSON describing the drive an image file stands in for
+  Journal         the resume file of an interrupted wipe
+  REAL / EMULATED / SIMULATED   how a plan step was actually carried out
